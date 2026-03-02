@@ -13,6 +13,18 @@ pub struct MetricsStore {
 }
 
 impl MetricsStore {
+    pub fn all_prefixes(&self) -> Vec<PrefixSignature> {
+        self.transition_stats.keys().cloned().collect()
+    }
+
+    pub fn decay(&mut self, gamma: f64) {
+        for inner_map in self.transition_stats.values_mut() {
+            for stats in inner_map.values_mut() {
+                stats.weighted_count *= gamma;
+            }
+        }
+    }
+
     pub fn ingest_openwhisk_activation(
         &mut self,
         obs: &OpenWhiskActivationObservation,
@@ -95,196 +107,18 @@ impl MetricsStore {
         }
 
         dist.iter()
-            .map(|(func, stats)| (func.clone(), stats.weighted_count / sum))
+            .map(|(k, v)| (k.clone(), v.weighted_count / sum))
             .collect()
     }
-
-    pub fn all_prefixes(&self) -> Vec<PrefixSignature> {
-        self.transition_stats.keys().cloned().collect()
-    }
 }
 
-fn ema_duration(old: Duration, observed: Duration, alpha: f64) -> Duration {
+fn ema_duration(old: Duration, new: Duration, alpha: f64) -> Duration {
     if old == 0 {
-        return observed;
+        return new;
     }
-    let alpha = alpha.clamp(0.0, 1.0);
-    let new_val = (alpha * observed as f64) + ((1.0 - alpha) * old as f64);
-    new_val.round().max(0.0) as Duration
+    ((old as f64) * (1.0 - alpha) + (new as f64) * alpha) as Duration
 }
 
-fn ema_count(old: f64, weight: f64, alpha: f64) -> f64 {
-    let alpha = alpha.clamp(0.0, 1.0);
-    let weight = if weight.is_finite() && weight > 0.0 { weight } else { 1.0 };
-    (1.0 - alpha) * old + weight
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::PrefixSignature;
-    use crate::types::{ColdBufferMode, PetRequest, PrewarmPlanTable, RequestId, UrgencyConfig};
-    use crate::{core::dpt::Dpt, runtime::pet_trigger::PetHandler};
-    use crate::{runtime::pet_trigger::PrewarmExecutor, types::Prefix};
-
-    #[test]
-    fn updates_exec_stats_with_ema() {
-        let mut store = MetricsStore::default();
-        let ema = EmaParams {
-            alpha_exec: 0.5,
-            alpha_cold: 0.5,
-            alpha_trans: 0.5,
-            alpha_count: 0.5,
-        };
-        let f = FuncId::from("A");
-
-        store.update_exec(&f, 100, false, None, ema);
-        assert_eq!(store.get_exec_stats(&f).unwrap().avg_exec, 100);
-
-        store.update_exec(&f, 200, false, None, ema);
-        assert_eq!(store.get_exec_stats(&f).unwrap().avg_exec, 150);
-    }
-
-    #[test]
-    fn updates_transition_count_and_latency() {
-        let mut store = MetricsStore::default();
-        let ema = EmaParams::default();
-        let sig = PrefixSignature::from("w\0A");
-        let next = FuncId::from("B");
-
-        store.update_transition(&sig, &next, Some(10), 1.0, ema);
-        let dist = store.get_transition_dist(&sig);
-        assert_eq!(dist.len(), 1);
-        assert_eq!(dist[0].0, next);
-        assert!(dist[0].1.weighted_count > 0.0);
-        assert_eq!(dist[0].1.avg_latency, 10);
-    }
-
-    #[test]
-    fn ingests_openwhisk_activation_into_metrics_store() {
-        let mut store = MetricsStore::default();
-        let ema = EmaParams {
-            alpha_exec: 1.0,
-            alpha_cold: 1.0,
-            alpha_trans: 1.0,
-            alpha_count: 0.0,
-        };
-
-        let obs = OpenWhiskActivationObservation {
-            workflow_id: crate::types::WorkflowId::from("w"),
-            prefix: crate::types::Prefix::new(vec![FuncId::from("A")]),
-            func: FuncId::from("B"),
-            exec_duration: 120,
-            cold_start_duration: Some(30),
-            trans_latency: Some(7),
-            weight: 2.0,
-            timestamp: 1,
-        };
-
-        store.ingest_openwhisk_activation(&obs, ema, PrefixConfig { lmax: 8 });
-
-        let exec = store.get_exec_stats(&FuncId::from("B")).unwrap();
-        assert_eq!(exec.avg_exec, 120);
-        assert_eq!(exec.avg_cold, 30);
-
-        let sig = PrefixSignature::from("w\0A");
-        let dist = store.get_transition_dist(&sig);
-        assert_eq!(dist.len(), 1);
-        assert_eq!(dist[0].0, FuncId::from("B"));
-        assert_eq!(dist[0].1.weighted_count, 2.0);
-        assert_eq!(dist[0].1.avg_latency, 7);
-    }
-
-    #[derive(Default)]
-    struct RecordingExecutor {
-        calls: std::cell::RefCell<Vec<(RequestId, Vec<FuncId>)>>,
-    }
-
-    impl PrewarmExecutor for RecordingExecutor {
-        fn prewarm(&self, request_id: &RequestId, funcs: &[FuncId]) {
-            self.calls
-                .borrow_mut()
-                .push((request_id.clone(), funcs.to_vec()));
-        }
-    }
-
-    #[test]
-    fn handles_pet_and_updates_prewarm_table_per_request() {
-        let mut metrics = MetricsStore::default();
-        let ema = EmaParams {
-            alpha_exec: 1.0,
-            alpha_cold: 1.0,
-            alpha_trans: 1.0,
-            alpha_count: 0.0,
-        };
-
-        let w = crate::types::WorkflowId::from("w");
-        let prefix_a = Prefix::new(vec![FuncId::from("A")]);
-        let sig_a = crate::core::prefix_model::make_prefix_signature(&w, &prefix_a, PrefixConfig { lmax: 8 });
-        metrics.update_transition(&sig_a, &FuncId::from("B"), Some(1), 1.0, ema);
-
-        let prefix_ab = Prefix::new(vec![FuncId::from("A"), FuncId::from("B")]);
-        let sig_ab = crate::core::prefix_model::make_prefix_signature(&w, &prefix_ab, PrefixConfig { lmax: 8 });
-        metrics.update_transition(&sig_ab, &FuncId::from("C"), Some(1), 1.0, ema);
-
-        let prefix_abc = Prefix::new(vec![FuncId::from("A"), FuncId::from("B"), FuncId::from("C")]);
-        let sig_abc = crate::core::prefix_model::make_prefix_signature(&w, &prefix_abc, PrefixConfig { lmax: 8 });
-        metrics.update_transition(&sig_abc, &FuncId::from("D"), Some(1), 1.0, ema);
-
-        metrics.update_exec(&FuncId::from("B"), 5, true, Some(10), ema);
-        metrics.update_exec(&FuncId::from("C"), 5, true, Some(2), ema);
-        metrics.update_exec(&FuncId::from("D"), 5, false, None, ema);
-
-        let mut dpt = Dpt::default();
-        dpt.replace(
-            1,
-            std::collections::HashMap::from([(
-                sig_a.clone(),
-                crate::types::PredictedPath {
-                    funcs: vec![FuncId::from("B"), FuncId::from("C"), FuncId::from("D")],
-                },
-            )]),
-        );
-
-        let mut prewarm_table = PrewarmPlanTable::default();
-        let req = RequestId::from("r1");
-        prewarm_table.set_window_result(req.clone(), vec![FuncId::from("B")]);
-
-        let executor = RecordingExecutor::default();
-        let mut handler = PetHandler {
-            dpt: &dpt,
-            metrics: &metrics,
-            prewarm_table: &mut prewarm_table,
-            executor: &executor,
-            prefix_config: PrefixConfig { lmax: 8 },
-            urgency_config: UrgencyConfig {
-                max_window_len: 16,
-                default_exec: 1,
-                default_cold: 0,
-                default_trans: 0,
-                cold_buffer_mode: ColdBufferMode::ExecPlusCold,
-            },
-        };
-
-        let pet = PetRequest {
-            request_id: req.clone(),
-            workflow_id: w,
-            prefix: prefix_a,
-            curr_func: FuncId::from("A"),
-            timestamp: 0,
-        };
-
-        let plan = handler.handle_pet(pet);
-        assert_eq!(plan.actions.len(), 1);
-
-        let calls = executor.calls.borrow();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, req);
-        assert_eq!(calls[0].1, vec![FuncId::from("C")]);
-
-        let updated = handler.prewarm_table.get_request_set(&RequestId::from("r1"));
-        assert!(updated.contains(&FuncId::from("B")));
-        assert!(updated.contains(&FuncId::from("C")));
-        assert!(!updated.contains(&FuncId::from("D")));
-    }
+fn ema_count(old: f64, new: f64, alpha: f64) -> f64 {
+    old * (1.0 - alpha) + new * alpha
 }

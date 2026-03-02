@@ -6,7 +6,7 @@ use crate::core::prefix_model::make_prefix_signature;
 use crate::runtime::urgency_window::select_prewarm_set;
 use crate::types::{
     FuncId, PetRequest, PrefixConfig, PrewarmAction, PrewarmPlan, PrewarmPlanTable, RequestId,
-    UrgencyConfig,
+    UrgencyConfig, PredictedPath,
 };
 
 pub trait PrewarmExecutor {
@@ -27,13 +27,13 @@ impl<'a> PetHandler<'a> {
         let sig = make_prefix_signature(&pet.workflow_id, &pet.prefix, self.prefix_config);
         let predicted = self
             .dpt
-            .get(&sig)
-            .map(|p| p.funcs.clone())
-            .unwrap_or_default();
+            .get_prediction(&sig)
+            .cloned()
+            .unwrap_or_else(|| PredictedPath::new(vec![]));
 
         let selected = select_prewarm_set(
             &pet,
-            &predicted,
+            &predicted.funcs,
             self.metrics,
             self.prefix_config,
             self.prewarm_table,

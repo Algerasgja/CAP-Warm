@@ -15,7 +15,7 @@ impl Dpt {
         self.version
     }
 
-    pub fn get(&self, prefix_signature: &PrefixSignature) -> Option<&PredictedPath> {
+    pub fn get_prediction(&self, prefix_signature: &PrefixSignature) -> Option<&PredictedPath> {
         self.table.get(prefix_signature)
     }
 

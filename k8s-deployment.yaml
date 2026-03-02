@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cap-warm
+  labels:
+    app: cap-warm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cap-warm
+  template:
+    metadata:
+      labels:
+        app: cap-warm
+    spec:
+      containers:
+      - name: cap-warm
+        image: 192.168.31.96:5000/cap-warm:0.1
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        env:
+        - name: RUST_LOG
+          value: "info"
+        - name: HTTP__PORT
+          value: "3000"
+        - name: HTTP__BIND_ADDR
+          value: "0.0.0.0"
+        # Configure OpenWhisk connection
+        - name: OPENWHISK__BASE_URL
+          value: "http://openwhisk.openwhisk.svc.cluster.local:30516" # Adjust based on actual OW service
+        - name: OPENWHISK__API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openwhisk-secret
+              key: api-key
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cap-warm-service
+spec:
+  selector:
+    app: cap-warm
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+  type: ClusterIP

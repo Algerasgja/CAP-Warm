@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FuncId(pub String);
 
 impl FuncId {
@@ -28,7 +29,7 @@ impl fmt::Display for FuncId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorkflowId(pub String);
 
 impl WorkflowId {
@@ -55,7 +56,34 @@ impl fmt::Display for WorkflowId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RunId(pub String);
+
+impl RunId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+impl From<&str> for RunId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl AsRef<str> for RunId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RunId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PrefixSignature(pub String);
 
 impl PrefixSignature {
@@ -82,7 +110,7 @@ impl fmt::Display for PrefixSignature {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Prefix {
     pub funcs: Vec<FuncId>,
 }
@@ -234,7 +262,7 @@ pub struct Observation {
     pub timestamp: Timestamp,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OpenWhiskActivationObservation {
     pub workflow_id: WorkflowId,
     pub prefix: Prefix,
@@ -246,7 +274,7 @@ pub struct OpenWhiskActivationObservation {
     pub timestamp: Timestamp,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub String);
 
 impl RequestId {
@@ -273,7 +301,7 @@ impl fmt::Display for RequestId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PetRequest {
     pub request_id: RequestId,
     pub workflow_id: WorkflowId,
@@ -333,4 +361,80 @@ impl PrewarmPlanTable {
             .cloned()
             .unwrap_or_default()
     }
+}
+
+// LoadGen Events
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunStarted {
+    pub workflow_id: WorkflowId,
+    pub run_id: RunId,
+    pub request_id: RequestId,
+    pub timestamp: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PetEvent {
+    pub workflow_id: WorkflowId,
+    pub run_id: RunId,
+    pub request_id: RequestId,
+    pub prefix: Vec<FuncId>,
+    pub curr_func: FuncId,
+    pub next_func: FuncId,
+    pub timestamp: Timestamp,
+}
+
+impl From<PetEvent> for PetRequest {
+    fn from(e: PetEvent) -> Self {
+        Self {
+            request_id: e.request_id,
+            workflow_id: e.workflow_id,
+            prefix: Prefix::new(e.prefix),
+            curr_func: e.curr_func,
+            timestamp: e.timestamp,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationCompleted {
+    pub workflow_id: WorkflowId,
+    pub run_id: RunId,
+    pub request_id: RequestId,
+    pub prefix: Vec<FuncId>,
+    pub func: FuncId,
+    pub activation_id: String,
+    pub start_ts: Timestamp,
+    pub end_ts: Timestamp,
+    pub exec_duration: Duration,
+    pub cold_start_duration: Option<Duration>,
+    pub transition_time: Duration,
+    pub timestamp: Timestamp,
+}
+
+impl From<ActivationCompleted> for OpenWhiskActivationObservation {
+    fn from(e: ActivationCompleted) -> Self {
+        Self {
+            workflow_id: e.workflow_id,
+            prefix: Prefix::new(e.prefix),
+            func: e.func,
+            exec_duration: e.exec_duration,
+            cold_start_duration: e.cold_start_duration,
+            trans_latency: Some(e.transition_time), // Assuming transition_time is trans_latency
+            weight: 1.0, // Default weight
+            timestamp: e.timestamp,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub workflow_id: WorkflowId,
+    pub run_id: RunId,
+    pub request_id: RequestId,
+    pub start_time: Timestamp,
+    pub end_time: Timestamp,
+    pub total_hops: usize,
+    pub total_exec_duration: Duration,
+    pub cold_start_count: usize,
+    pub termination_reason: String,
 }
